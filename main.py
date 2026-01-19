@@ -8,8 +8,8 @@ from loguru import logger
 
 # ================= CONFIG =================
 
-api_id = 123456
-api_hash = "YOUR_API_HASH"
+api_id = 9285198
+api_hash = "39QDt7fVWUuPqLsPDAF3XkuDQEKiZkxN9z"
 
 client = Client(
     session="session/wordchain",
