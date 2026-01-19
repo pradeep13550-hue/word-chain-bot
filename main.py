@@ -1,210 +1,203 @@
+import re
 import asyncio
 import random
-import re
-import logging
-
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message
+from kurigram import Client
+from telethon import events
+from telethon.tl.types import MessageEntityItalic, MessageEntityTextMention
+from loguru import logger
 
 # ================= CONFIG =================
 
-API_ID = 123456        # <-- PUT YOUR API ID
-API_HASH = "API_HASH"  # <-- PUT YOUR API HASH
+api_id = 123456
+api_hash = "YOUR_API_HASH"
 
-# =========================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+client = Client(
+    session="session/wordchain",
+    api_id=api_id,
+    api_hash=api_hash
 )
-logger = logging.getLogger(__name__)
 
-used_words = {}
+WORDCHAIN_BOT_USERNAME = "on9wordchainbot"
+
+# ================= REGEX =================
 
 RESPONSE_PATTERN = re.compile(r"(is accepted\.|has been used\.|is not)")
 WORD_INFO_PATTERN = re.compile(r"Your word must start with (.+)")
-WORD_LENGTH_PATTERN = re.compile(r"\d+")
+WORD_LENGTH_PATTERN = re.compile(r'\d+')
 
+used_words = {}
+
+# ================= HELPERS =================
 
 def is_game_enabled():
     def decorator(func):
-        async def wrapper(*args, **kwargs):
-            return await func(*args, **kwargs)
+        async def wrapper(event):
+            return await func(event)
         return wrapper
     return decorator
 
 
 def find_random_words(file_path, start_letter, word_length, include_letter=None):
     results = []
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            word = line.strip().upper()
+    with open(file_path, "r", encoding="utf-8") as f:
+        for word in f:
+            word = word.strip().lower()
             if len(word) != word_length:
                 continue
-            if not word.startswith(start_letter):
+            if not word.startswith(start_letter.lower()):
                 continue
-            if include_letter and include_letter not in word:
+            if include_letter and include_letter.lower() not in word:
                 continue
             results.append(word)
+    random.shuffle(results)
     return results
 
 
-@Client.on_message(filters.user("on9wordchainbot") & filters.group)
-@is_game_enabled()
-async def wordchain_listener(client, message: Message):
-    logger.debug(f"[MAIN] Received message: {message.text}")
-
+async def extract_first_mention(event, text):
     try:
-        text = message.text
-        chat_id = message.chat.id
+        entities = event.message.entities or []
+        turn_index = text.index("Turn:")
 
-        if "Turn:" not in text:
-            return
-
-        first_mention = await extract_first_mention(message, text)
-        if not first_mention or first_mention.id != client.me.id:
-            return
-
-        word_requirements = await extract_word_requirements(text)
-        if not word_requirements:
-            return
-
-        start_letter, word_length, include_letter = word_requirements
-
-        filtered_words = find_random_words(
-            "words.txt", start_letter, word_length, include_letter
-        )
-
-        if not filtered_words:
-            await client.send_message(client.me.id, "No suitable word found.")
-            return
-
-        if chat_id not in used_words:
-            used_words[chat_id] = []
-
-        success = await attempt_word_submission(
-            client, chat_id, filtered_words, used_words[chat_id]
-        )
-
-        if success:
-            logger.info("Word successfully submitted")
-
+        for entity in entities:
+            if isinstance(entity, MessageEntityTextMention):
+                if entity.offset > turn_index:
+                    return entity.user_id
+        return None
     except Exception as e:
-        logger.error(f"Main handler error: {e}")
-        await client.send_message(client.me.id, f"ERROR: {e}")
-
-
-async def extract_first_mention(message: Message, text: str):
-    entities = message.entities or []
-    if not entities:
+        logger.error(f"[MENTION] {e}")
         return None
 
-    turn_index = text.index("Turn:")
 
-    for entity in entities:
-        if (
-            entity.type == enums.MessageEntityType.TEXT_MENTION
-            and entity.offset > turn_index
-        ):
-            return entity.user
-    return None
-
-
-async def extract_word_requirements(text: str):
-    match = WORD_INFO_PATTERN.search(text)
-    if not match:
-        return None
-
-    info = match.group(1)
-    capitals = re.findall(r"[A-Z]", info)
-    length_match = WORD_LENGTH_PATTERN.search(info)
-
-    if not length_match:
-        return None
-
-    word_length = int(length_match.group())
-
-    if len(capitals) == 1:
-        return capitals[0], word_length, None
-    elif len(capitals) == 2:
-        return capitals[0], word_length, capitals[1]
-
-    return None
-
-
-async def attempt_word_submission(
-    client, chat_id, filtered_words, used_words_list, max_attempts=5
-):
-    for _ in range(max_attempts):
-        selected_word = await select_unused_word(
-            filtered_words, used_words_list
-        )
-        if not selected_word:
-            continue
-
-        try:
-            await asyncio.sleep(4)
-            await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
-            await client.send_message(chat_id, selected_word)
-            used_words_list.append(selected_word)
-        except Exception:
-            continue
-
-        result = await wait_for_response(client, chat_id, selected_word)
-
-        if result == "accepted":
-            return True
-        elif result == "format_error":
-            return False
-
-    return False
-
-
-async def select_unused_word(filtered_words, used_words_list, max_tries=10):
-    for _ in range(max_tries):
-        word = random.choice(filtered_words)
-        if word not in used_words_list:
-            return word
-    return None
-
-
-async def wait_for_response(client, chat_id, submitted_word, timeout=4):
+async def extract_word_requirements(text):
     try:
-        response = await client.listen.Message(
-            filters.regex(RESPONSE_PATTERN)
-            & filters.user("on9wordchainbot")
-            & filters.chat(chat_id),
-            timeout=timeout,
+        match = WORD_INFO_PATTERN.search(text)
+        if not match:
+            return None
+
+        line = match.group(1)
+        caps = re.findall(r"[A-Z]", line)
+        length_match = WORD_LENGTH_PATTERN.search(line)
+
+        if not length_match:
+            return None
+
+        length = int(length_match.group())
+
+        if len(caps) == 1:
+            return caps[0], length, None
+        elif len(caps) == 2:
+            return caps[0], length, caps[1]
+        return None
+    except Exception as e:
+        logger.error(f"[REQ] {e}")
+        return None
+
+
+async def select_unused_word(words, used, max_tries=10):
+    for _ in range(max_tries):
+        w = random.choice(words)
+        if w not in used:
+            return w
+    return None
+
+
+async def wait_for_response(chat_id, submitted_word, timeout=4):
+    try:
+        event = await client.wait_for_event(
+            events.NewMessage(
+                chats=chat_id,
+                from_users=WORDCHAIN_BOT_USERNAME,
+                pattern=RESPONSE_PATTERN
+            ),
+            timeout=timeout
         )
 
-        text = response.text.lower()
+        text = event.text.lower()
 
-        if "does not start" in text or "does not include" in text:
+        if "does not start with" in text or "does not include" in text:
             return "format_error"
 
-        for entity in response.entities or []:
-            if entity.type == enums.MessageEntityType.ITALIC:
-                italic_text = response.text[
-                    entity.offset : entity.offset + entity.length
-                ]
-                if submitted_word.lower() in italic_text.lower():
+        if not event.message.entities:
+            return "no_entities"
+
+        for ent in event.message.entities:
+            if isinstance(ent, MessageEntityItalic):
+                italic = event.text[ent.offset:ent.offset + ent.length]
+                if submitted_word.lower() in italic.lower():
                     if "accepted" in text:
                         return "accepted"
-                    return "rejected"
+                    if "used" in text or "is not" in text:
+                        return "rejected"
 
         return "unclear"
 
     except asyncio.TimeoutError:
         return "timeout"
-    except Exception:
+    except Exception as e:
+        logger.error(f"[WAIT] {e}")
         return "error"
 
 
-app = Client(
-    "wordchain",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    workdir="session"
-)
+async def attempt_word_submission(chat_id, words, used, max_attempts=5):
+    for _ in range(max_attempts):
+        word = await select_unused_word(words, used)
+        if not word:
+            continue
 
-app.run()
+        await asyncio.sleep(4)
+        await client.send_chat_action(chat_id, "typing")
+        await client.send_message(chat_id, word)
+
+        used.append(word)
+
+        result = await wait_for_response(chat_id, word)
+
+        if result == "accepted":
+            return True
+        if result == "format_error":
+            return False
+
+    return False
+
+# ================= MAIN LISTENER =================
+
+@client.on(events.NewMessage(from_users=WORDCHAIN_BOT_USERNAME))
+@is_game_enabled()
+async def wordchain_listener(event):
+    try:
+        text = event.text
+        chat_id = event.chat_id
+
+        if "Turn:" not in text or not event.is_group:
+            return
+
+        me = await client.get_me()
+        mention_id = await extract_first_mention(event, text)
+
+        if mention_id != me.id:
+            return
+
+        req = await extract_word_requirements(text)
+        if not req:
+            return
+
+        start, length, include = req
+
+        words = find_random_words("words.txt", start, length, include)
+        if not words:
+            await client.send_message("me", "No suitable word found")
+            return
+
+        if chat_id not in used_words:
+            used_words[chat_id] = []
+
+        await attempt_word_submission(chat_id, words, used_words[chat_id])
+
+    except Exception as e:
+        logger.error(f"[MAIN] {e}")
+        await client.send_message("me", f"ERROR: {e}")
+
+# ================= START =================
+
+logger.info("Starting Kurigram WordChain Userbot")
+client.run()
