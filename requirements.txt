@@ -1,2 +1,4 @@
-pyrogram
-tgcrypto
+kurigram>=2.1.0
+telethon>=1.34.0
+asyncio
+loguru>=0.7.0
